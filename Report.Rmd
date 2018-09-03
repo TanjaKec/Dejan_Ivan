@@ -1,0 +1,960 @@
+---
+title: "Report"
+author: "Tanja"
+date: "12/07/2018"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data
+
+Available data set and its variables:
+```{r data_load, echo = FALSE, warnings = FALSE, message = FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(MASS)
+library(purrr)
+#library(h2o)
+library(ggvis)
+library(psych)
+
+# Read Data
+mydata <- read.csv("shipping_data.csv", header = T)
+# -----------
+# fh_commission: shipper_closed_price - carrier_closed_price
+# -----------
+# Separate Long and Lat for 'destination_point' and 'origin_point' variables
+# as double types withour removing original variables.
+# -----------
+mydata <- mydata %>% 
+  separate(destination_point, c("destination_point_lat", "destination_point_long"), sep = ", ", remove = FALSE, convert = TRUE) %>% 
+  separate(origin_point, c("origin_point_lat", "origin_point_long"), sep = ", ", remove = FALSE, convert = TRUE)
+# -----------
+# attach(mydata)
+# -----------
+# ==============================================
+mydata <- mydata %>% 
+  mutate(diffhourS = as.double(difftime(delivery_scheduled_until, delivery_scheduled_at, units = "hours"))) %>% 
+  mutate(diffhourSP = as.double(difftime(delivery_scheduled_at, pickup_scheduled_at, units = "hours"))) %>% 
+  mutate(diffhourMP = as.double(difftime(matched_at,  posted_at, units = "hours")))
+
+mydata$unloaded_at[mydata$unloaded_at == ""] <- NA
+# ==============================================
+glimpse(mydata)
+```
+
+
+Note that three new variables have been created:
+
+1) $diffhourS = delivery\_scheduled\_until - delivery\_scheduled\_at$,
+2) $diffhourSP = delivery\_scheduled\_at - pickup\_scheduled\_at$ and
+3) $diffhourMP = matched\_at - posted\_at$. 
+
+calculating time differences in hours.
+
+
+Looking at the available variables we assume that `fh_commision` is a key variable of interest and is derived by 
+$$fh\_commision = shipper\_closed\_price - carrier\_closed\_price$$
+We will start with examining the response variable `fh_commision`, by looking at its distribution.
+
+```{r respons_density, echo = FALSE}
+mydata %>% ggvis(~fh_commission) %>% 
+  #layer_histograms(width = 100, fill:="yellow") %>% 
+  #layer_densities(fill := "green", stroke := "gray") %>%
+  layer_histograms(width = 100, fill:="steelblue")
+
+# Histogram overlaid with kernel density curve
+# Histogram with density instead of count on y-axis
+
+ggplot(mydata, aes(x = fh_commission)) + 
+       geom_histogram(aes(y=..density..), binwidth = 100, colour = "black", fill = "white") +
+       geom_density(alpha = 0.2, fill = "steelblue")
+
+boxplot(mydata$fh_commission, data = mydata, boxwex = 0.5, xlab = "fh_commision", col = "steelblue3", horizontal=T)
+
+summary(mydata$fh_commission)
+```
+
+There is a long 'tail' to the left caused by an extremely negative value. The majority of the observations are centered around the value of $200$ and data is slightly right skewed. 
+
+The questions that need addressing:
+
+ - is it ok to expect negative `fh_commission`s?
+ - is it possible to have extreme negative values or should they be treated as outliers?
+ 
+We should identify the extreme observations: 
+```{r fh_commissionTH, echo = TRUE}
+which(mydata$fh_commission < -500)
+which(mydata$fh_commission > 1000)
+``` 
+
+Since this variable is a linear combination of `shipper_closed_price` and  `carrier_closed_price` it would be useful to examine the correlation between those three variables.
+```{r corr_matrix, echo = FALSE}
+pairs.panels(data.frame(mydata$fh_commission, mydata$shipper_closed_price, mydata$carrier_closed_price), scale = TRUE)
+``` 
+
+If we take a look once again, but this time without extreme negative `fh_commition`:
+```{r corr_matrix!203, echo = FALSE}
+pairs.panels(data.frame(mydata$fh_commission[-203], mydata$shipper_closed_price[-203], mydata$carrier_closed_price[-203]), scale = TRUE)
+``` 
+
+we will notice a very strong relationship between `shipper_closed_price` and  `carrier_closed_price`. Should we model them? But!!!
+If we stick with `fh_commission` as our key variable of interest would it be appropriate to consider using  `shipper_closed_price` and `carrier_closed_price` as explanatory variables in the predictive model: They would be unknown and we would indirectly predict them. The answer is clearly NO! 
+
+For that reason `shipper_closed_price` and `carrier_closed_price` will not be considered for our model.
+
+# Bivariate analysis
+
+Let us look at bivariate relationships between **response** variable `fh_commission` and potential **explanatory** variables.
+
+### 1. `shipper_ask_price`
+
+`fh_commission` vs `shipper_ask_price`: M v M
+
+To explore the relationship between measured type variables we fit a regression model for a given response `y` and the explanatory variable `x`: $$ y = b_0 + b_1x + e, $$ where `e` is the error term (part of the variablity in `y` that is not explained by the fitted model ie. explanatory variable(s)).
+
+First we'll look at the summary of the explanatory variable `shipper_ask_price`.
+
+```{r shipper_ask_price, echo = FALSE}
+boxplot(mydata$shipper_ask_price/1000, data = mydata, boxwex = 0.5, xlab = "shipper_ask_price in $1,000", col = "steelblue3", horizontal=T)
+summary(mydata$shipper_ask_price)
+```
+It would be useful to identify the observations with very high `shipper_ask_price` above 20K
+```{r shipper_ask_priceTH, echo = FALSE}
+threshold <- which(mydata$shipper_ask_price /1000 > 20)
+threshold
+```
+and look at the spread of the data once again without the observations above this threshold.
+```{r shipper_ask_price_bp,  echo = FALSE}
+boxplot(mydata$shipper_ask_price[-threshold] / 1000, data = mydata, boxwex = 0.5, xlab = "shipper_ask_price in $1,000", col = "steelblue3", horizontal=T)
+```
+
+The key question is how important is the `shipper_ask_price` variable in explaining the variability in the `fh_commission`. To analyse this we fit a simple regression model: $$fh\_commission = b_0 + b_1shipper\_ask\_price$$ 
+```{r model_1,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata %>% 
+  ggvis(~shipper_ask_price, ~fh_commission, fill:="limegreen", stroke:="gray", opacity := 0.5)  %>% 
+  layer_points() %>% 
+  layer_model_predictions(model = "lm", se = TRUE)
+
+m1 <- lm(fh_commission ~ shipper_ask_price, data = mydata)
+summary(m1)
+```
+It appears to be a statistically significant relationship, even though the model accounts for  only $1.36\%$ of variability in `fh_commission` ($R^2=1.36\%$). 
+
+### 2. `distance`
+
+`fh_commission` vs `distance`: M v M
+
+We will do the same analysis as above: 
+```{r distance, echo = FALSE}
+boxplot(mydata$distance, data = mydata, boxwex = 0.5, xlab = "distance", col = "steelblue3", horizontal=T)
+summary(mydata$distance)
+```
+Distribution of `distance` doesn't present any issues.
+```{r model_2,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata <- mydata %>% 
+  mutate(cross_border = as.factor(is_cross_border*1))
+mydata %>% 
+  ggvis(~distance, ~fh_commission, fill =~ cross_border, stroke := "gray", opacity := 0.5) %>% layer_points() %>% 
+  layer_model_predictions(model = "lm", stroke := "red")
+
+m2 <- lm(fh_commission ~ distance, data = mydata)
+summary(m2)
+```
+This is a statisticly valid relationship with $R^2=11.91\%$.
+
+### 3. `duration`
+
+`fh_commission` vs `duration`: M v M
+
+We expect to get very similar outcomes as for the previous analysis of `fh_commission` vs `distance`, since `duration` and `distance` are highly correlated. 
+```{r dist_dur_corr, echo = TRUE}
+cor(mydata$distance, mydata$duration)
+```
+
+```{r duration, echo = FALSE}
+boxplot(mydata$duration, data = mydata, boxwex = 0.5, xlab = "duration ", col = "steelblue3", horizontal=T)
+summary(mydata$duration)
+```
+Distribution of `distance` doesn't present any issues.
+```{r model_3,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata <- mydata %>% 
+  mutate(cross_border =as.factor(is_cross_border*1))
+mydata %>% 
+  ggvis(~duration , ~fh_commission, fill =~ cross_border, stroke := "gray", opacity := 0.5) %>% layer_points() %>% 
+  layer_model_predictions(model = "lm", stroke := "red")
+
+m3 <- lm(fh_commission ~ duration , data = mydata)
+summary(m3)
+```
+This is a statisticly valid relationship with $R^2=10.32\%$.
+
+### 4. `delivery_scheduled_until`: month, day
+```{r month_until, echo = FALSE}
+mydata %>% 
+  ggvis(~factor(month(delivery_scheduled_until)), fill := "steelblue") %>% 
+  layer_bars() %>% 
+  add_axis("x", title = "month") 
+
+mydata %>% 
+   ggvis(~factor(day(delivery_scheduled_until)), fill := "steelblue") %>% 
+   layer_bars() %>% 
+   add_axis("x", title = "day in the month") 
+```
+`delivery_scheduled_until` slows down over the summer period and does not show any pattern over the monthly period.
+
+### 5. `delivery_scheduled_at`: month, day
+
+We'll do the same analysis of `delivery_scheduled_at`.
+```{r month_at, echo = FALSE}
+mydata %>% 
+  ggvis(~factor(month(delivery_scheduled_at)), fill := "steelblue") %>% 
+  layer_bars() %>% 
+  add_axis("x", title = "month") 
+
+mydata %>% 
+   ggvis(~factor(day(delivery_scheduled_at)), fill := "steelblue") %>% 
+   layer_bars() %>% 
+   add_axis("x", title = "day in the month") 
+```
+We see very similar results as for `delivery_scheduled_until`.
+
+### 6. `pickup_scheduled_at`: month, day
+```{r pickup_at, echo = FALSE}
+mydata %>% 
+  ggvis(~factor(month(pickup_scheduled_at)), fill := "steelblue") %>% 
+  layer_bars() %>% 
+  add_axis("x", title = "month") 
+
+mydata %>% 
+   ggvis(~factor(day(pickup_scheduled_at)), fill := "steelblue") %>% 
+   layer_bars() %>% 
+   add_axis("x", title = "day in the month") 
+```
+Monthly figures are almost identical, with some slight deviations for days without any significant pattern.
+
+### 7. `is_hazmat`
+
+`fh_commission` vs `is_hazmat`: M v A(2)
+
+This is a *'measured vs. attribute'* type of problem. We split the measured variable into subgroups according to the levels of the attribute variable to assess the similarity of the subdistributions. The question we want to answer is: Are the subdistributions the same or different?
+
+Graphical visualisation of the two subdustributions might help to answer this question!
+Boxplots are the standard graphical method of displaying this sort of data.
+The graphical display of the boxplot enables both the difference in 'means' relative to their spreads
+(variability) to be assessed.
+
+```{r is_hazmat, echo = FALSE }
+ggplot(mydata, aes(as.factor(is_hazmat), fh_commission)) + 
+  geom_boxplot(outlier.size = 0) +
+  coord_flip() +
+  geom_jitter(position=position_jitter(width=0.30), shape = 20, size = 3, aes(colour=as.factor(is_hazmat)), alpha=0.75) +
+  stat_summary(fun.y=mean, shape=23, size = 3, fill = "yellow", col= "black", geom='point') +
+  labs (x = "is_hazmat", y = "fh_commission") +
+  theme(panel.border = element_rect(fill = NA, colour = "black", size = 2)) +
+  theme(plot.title = element_text(size = 20, vjust = 2))
+```
+
+There are only a few 
+```{r, echo = FALSE} 
+sum(mydata$is_hazmat)
+``` 
+observations with `is_hazmat = TRUE` and it would not be suitable to use for the modelling. Nonetheless, it is interesting to notice that all the `fh_commisions` for `is_hazmat = TRUE` are around their average value:
+```{r, echo = FALSE} 
+mydata %>% 
+  group_by(as.factor(is_hazmat)) %>% 
+    summarise(mean_fh = mean(fh_commission))
+
+mydata$fh_commission[which(mydata$is_hazmat)]
+``` 
+
+### 8. `load_description`
+
+`fh_commission` vs `load_value` M v A(>2)
+
+Let us look at the summary of the `load_equipment', but before we do that first we will check the number of possible outcomes:
+
+```{r nolevels_description, echo = FALSE}
+nlevels(mydata$load_description)
+```
+There are $187$ levels all together, so we will look only at the first 21 possible outcomes to get the feel for the information it provides:
+```{r summary_description, echo = FALSE}
+summ <- summary(mydata$load_description)
+head(summ, n = 21)
+```
+It looks very messy!!! 😮
+This variable would deffinitely need to be tidied up before it could be considered for any analysis. 
+Time is needed for organising data into a suitable format and acquiring the skills required for using ‘regular expressions’ 😬. This would involve getting rid of punctuation symbols, developing consistency in typing singular or plural, spaces, capital letters etc. For example, we should aim to get something like this, but tidier and better:
+
+```{r tidyup_description, echo = FALSE}
+mydata$load_description <- as.factor(toupper(mydata$load_description))
+a <- gsub("[;._-]", "", mydata$load_description)
+mydata$load_description <- gsub(" ", "", a)
+mydata$load_description <- as.factor(mydata$load_description)
+summ <- summary(mydata$load_description)
+head(summ, n = 20)
+nlevels(mydata$load_description)
+```
+This does look better, but it still has over $150$ levels. This variable would need some considerable attention before it could be deemed suitable for modelling. 
+
+### 9. `load_value`
+
+`fh_commission` vs `load_value` M v M
+
+```{r load_value, echo = FALSE}
+mybp <- boxplot(mydata$load_value, data = mydata, boxwex = 0.5, xlab = "load_value in $1,000", col = "steelblue3", horizontal=T)
+summary(mydata$load_value)
+```
+Let us see the spread without the 'outliers' identified on the boxplot at the positions
+```{r load_value_bp, echo = FALSE}
+th <- which(mydata$load_value %in% mybp$out)
+th
+mybp$out
+boxplot(mydata$load_value[-th] / 1000, data = mydata, boxwex = 0.5, xlab = "load_value in $1,000", col = "steelblue3", horizontal=T)
+```
+
+```{r model_4,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata %>% 
+  ggvis(~load_value, ~fh_commission, fill =~ cross_border, stroke := "gray", opacity := 0.5) %>% layer_points() %>% 
+  layer_model_predictions(model = "lm", stroke := "red")
+
+m4 <- lm(fh_commission ~ load_value, data = mydata)
+summary(m4)
+```
+The relationship is not statistically significant with $R^2=0.03\%$ and $p=0.55$.
+
+### 10. `load_equipment`
+
+`fh_commission` vs `load_equipment`: M vs A(>2)
+
+Informal part of the analysis for a measured response against an attribute explanatory variable with more than two levels is exactly the same as for the data analysis situation were the explanatory variable has exactly two levels; the interpretation is a little more difficult due to the larger number of levels but the principles are exactly the same.
+
+To detect a connection/link between the response variable and the explanatory variable requires a clear
+definition of exactly what a connection/link is.
+
+The formal definition of no link for 'M vs A' is:
+
+ - If the average value of the response variable is independent of the level of the attribute
+explanatory variable then the response variable and the attribute explanatory variable are independent (not connected).
+
+Conversely:
+
+- If the average value of the response variable is dependent on the level of the attribute explanatory variable then the attribute explanatory variable influences the value of the response variable, so the response variable and the attribute explanatory variable are connected.
+
+An examination of the means and the comparative boxplots will yield one of three possible decisions:
+
+- On the sample evidence there is clear evidence of no connection.
+- On the sample evidence there is clear evidence of a connection.
+- The sample evidence is inconclusive and further, more formal data analysis is required.
+
+If further data analysis is required then it takes the form of a hypothesis test. The data analysis situation Measured v Attribute requires two different hypotheses tests. A hypothesis test for the data analysis situation where the attribute explanatory variable has exactly two levels uses `t-test`. A different hypothesis test is required for the situation where the attribute explanatory variable has
+three or more levels. Formal Data Analysis for 'M v A(>2)' is known as *One-Way Analysis of Variance* (often abbreviated as **one-way ANOVA**), for which we use the `F-test`.
+
+The problem is exactly the same as with the two level attribute situation, namely is the difference between the means large enough to suggest that there is a real difference, or is the difference a difference that could have occurred by pure chance? (The difference is within the limits of sampling error). Implying that if there is no connection then by definition all the true means will be the same, whilst if there is a connection then the means are likely to be different.
+
+Let us obtain the summary of the `load_equipment'
+
+```{r load_equipment1, echo = FALSE}
+summary(mydata$load_equipment)
+```
+It appears that data is not balanced as there are only a few observations in `Reefer` category. Let us look at the boxplots to examine the relationship.
+
+```{r load_equipment_bp, echo = FALSE}
+ggplot(mydata, aes(load_equipment, fh_commission)) + 
+  geom_boxplot(outlier.size = 0) +
+  coord_flip() +
+  geom_jitter(position = position_jitter(width = 0.30), shape = 20, size = 3, aes(colour = load_equipment), alpha=0.75) +
+  stat_summary(fun.y = mean, shape = 23, size = 3, fill = "yellow", col = "black", geom = 'point') +
+  labs (x = "load_equipment", y = "fh_commission") +
+  theme(panel.border = element_rect(fill = NA, colour = "black", size = 2)) +
+  theme(plot.title = element_text(size = 20, vjust = 2))
+```
+Boxplots for `Flatbed` and `Dry Van` categories are overlapping and since there are only a few observations in `Reefer` with almost all values around the median it is hard to make a clear conclusion about the relationship between the two variables: `fh_commission` and `load_equipment`. Although one-way Anova might not be the most appropriate further analysis considering the 'shapes' of subdistributions it could still provide us with an insight that could help us in identifying a possible relationship. We will also perform a nonparametric Kruskal-Wallis test.  
+
+```{r load_equipment_ANOVA, echo = FALSE}
+summary(aov(fh_commission ~ load_equipment, data = mydata))
+kruskal.test(fh_commission ~ load_equipment, data = mydata) 
+```
+For both tests the $p$ values are well below $0.1\%$ suggesting that on the sample evidence this is a statistically significant relationship.
+
+### 11. `destination_state`
+
+`fh_commission` vs `destination_state`: M v A(>2)
+
+```{r destination_state, echo = FALSE}
+summary(mydata$destination_state)
+```
+There are olmost $50$ different levels for `destination_state`. Categorical data described through a large number of distinct values poses a serious challenge for regression algorithms which require numerical inputs. If we decide to use this variable in the predictive model it would be good to consider using  *target encoding* also known as *impact encoding*. This technique is explained in Daniele Micci-Barreca's papeer [A Preprocessing Scheme for High-Cardinality Categorical Attributes in Classification and Prediction Problems](https://kaggle2.blob.core.windows.net/forum-message-attachments/225952/7441/high%20cardinality%20categoricals.pdf). 
+
+Let us conduct *informal data analysis* for `fh_commission` vs `destination_state`.
+
+```{r destination_state_bp, echo = FALSE}
+ggplot(mydata, aes(destination_state, fh_commission)) + 
+  geom_boxplot(outlier.size = 0) +
+  coord_flip() +
+  geom_jitter(position = position_jitter(width = 0.30), shape = 20, size = 3, aes(colour = destination_state), alpha = 0.75, show.legend = F) +
+  stat_summary(fun.y = mean, shape = 23, size = 1, fill = "yellow", col= "black", geom = 'point') +
+  labs (x = "destination_state", y = "fh_commission") +
+  theme(panel.border = element_rect(fill = NA, colour = "black", size = 2)) +
+  theme(plot.title = element_text(size = 20, vjust = 2))
+```
+
+There is a clear difference amongst the groups, but the data is not balanced and not equally spread.
+For a *M vs A(>2)* type of problem we will perform a nonparametric Kruskal-Wallis test.
+```{r destination_state_KWTest, echo = FALSE}
+kruskal.test(fh_commission ~ destination_state, data = mydata) 
+```
+
+The output (`p-value < 2.2e-16`) suggests that based on the sample evidence this is a statistically significant relationship.
+
+### 12. `destination_`: `postal_code`; `city`; `country`
+
+Considering the type of information those variables are providing it would not be wrong to assume that they are in high correlation whit each oter. As `destination_state` can be observed as conglomerate of the other three, we will check their independence from it using *Chi-squared Test of Independence*. 
+
+```{r Chi^2_postal_code,  echo = FALSE, warnings = FALSE, message = FALSE}
+cat("postal_code:", '\n')
+tbl = table(mydata$destination_state, mydata$destination_postal_code) 
+suppressWarnings(chisq.test(tbl))
+```
+```{r Chi^2_city,  echo = FALSE, warnings = FALSE, message = FALSE}
+cat("city:", '\n')
+tbl = table(mydata$destination_state, mydata$destination_city)
+suppressWarnings(chisq.test(tbl))
+```
+```{r Chi^2_country,  echo = FALSE, warnings = FALSE, message = FALSE}
+cat("country:", '\n')
+tbl = table(mydata$destination_state, mydata$destination_country) 
+suppressWarnings(chisq.test(tbl))
+```
+The $p$ values are confirming our assumtion about those variable not being independent from each other.
+
+### 13. `origin_state`
+
+`fh_commission` vs `origin_state`: M v A(>2)
+
+We will conduct the equivalent analysis to the one we did for `fh_commission` vs `destination_state`, for obvious reasons.
+
+```{r origin_state_bp, echo = FALSE}
+ggplot(mydata, aes(origin_state, fh_commission)) + 
+  geom_boxplot(outlier.size = 0) +
+  coord_flip() +
+  geom_jitter(position = position_jitter(width = 0.30), shape = 20, size = 3, aes(colour = origin_state), alpha = 0.75, show.legend = F) +
+  stat_summary(fun.y = mean, shape = 23, size = 1, fill = "yellow", col= "black", geom = 'point') +
+  labs (x = "destination_state", y = "fh_commission") +
+  theme(panel.border = element_rect(fill = NA, colour = "black", size = 2)) +
+  theme(plot.title = element_text(size = 20, vjust = 2))
+```
+
+Yet again, there is a clear difference amongst the groups, but the data is not balanced and not equally spread.
+We will perform Kruskal-Wallis test.
+```{r origin_state_KWTest, echo = FALSE}
+kruskal.test(fh_commission ~ origin_state, data = mydata) 
+```
+The output (`p-value < 2.2e-16`) suggests that based on the sample evidence this is a statistically significant relationship.
+
+### 14. `origin_`: `postal_code`; `city`; `country`
+
+To check for independence between `origin_state` and the three variables above, we will perform *Chi-squared Test of Independence* for all. 
+
+```{r Chi^2_opostal_code,  echo = FALSE, warnings = FALSE, message = FALSE}
+cat("postal_code:", '\n')
+tbl = table(mydata$origin_state, mydata$origin_postal_code) 
+suppressWarnings(chisq.test(tbl))
+```
+The data is messy and we clearly have too many zero frequencies in observed counts causing *Chi-squared Test* to fail.
+
+```{r Chi^2_ocity,  echo = FALSE, warnings = FALSE, message = FALSE}
+cat("city:", '\n')
+tbl = table(mydata$origin_state, mydata$origin_city)
+suppressWarnings(chisq.test(tbl))
+```
+```{r Chi^2_ocountry,  echo = FALSE, warnings = FALSE, message = FALSE}
+cat("country:", '\n')
+tbl = table(mydata$origin_state, mydata$origin_country) 
+suppressWarnings(chisq.test(tbl))
+```
+The calculated $p$ values are confirming our assumption about those variables not being independent from each other.
+
+### 15. `carrier_name`
+
+`fh_commission` vs `carrier_name`: M v A(>2) 
+
+Let's see how many levels this variable has.
+```{r carrier_name, echo = FALSE}
+nlevels(mydata$carrier_name)
+```
+$309$ different categories are too many for plotting on a boxplot and this is a variable that would have to be encoded for its application in the predictive model.
+
+### 16. `status` 
+
+`fh_commission` vs `status`: M v A(>2)
+
+```{r status, echo = FALSE}
+summary(mydata$status)
+```
+Is there a point considering this variable in relation to the `fh_commission` as the pricing would have been done before the status cauld be obtained?
+
+### 17. `is_multistop` 
+
+`fh_commission` vs `is_multistop`: M v A(2)
+
+```{r is_multistop, echo = FALSE}
+summary(mydata$is_multistop)
+```
+
+What does this variable represent? Could it influence `fh_commission`?
+Let us see how many have `crossed the border`:
+
+### 18. `is_cross_border` 
+
+`fh_commission` vs `is_cross_border`: M v A(2)
+
+```{r is_cross_border, echo = FALSE}
+summary(mydata$is_cross_border)
+```
+Should we expect this variable to be directly linked with `destination_country`?
+```{r dest_c, echo = FALSE}
+summary(mydata$destination_country )
+```
+If not, as the data suggests, why not?
+
+
+### 19. `is_completed`
+
+`fh_commission` vs `is_completed`: M v A(2)
+
+This information is already provided through the variable `status`.
+```{r is_completed, echo = FALSE}
+summary(mydata$is_completed)
+cat("status:", '\n')
+summary(mydata$status)
+```
+
+Should we expect those variables to have influence on `fh_commission`?
+
+### 20. `is_dropped`
+
+`fh_commission` vs `is_dropped`: M v A(2)
+
+```{r is_dropped, echo = FALSE}
+summary(mydata$is_dropped)
+```
+
+Same question as above: Is it reasonable to consider this variable as an explanatory variable of `fh_commission`?
+
+### 21. `shipper_name`
+
+`fh_commission` vs `shipper_name`: M v A(>2)
+
+This is an attribute variable with over $40$ levels:
+```{r shipper_name, echo = FALSE}
+nlevels(mydata$shipper_name )
+```
+which is unbalanced:
+```{r shipper_name_bp, echo = FALSE}
+ggplot(mydata, aes(shipper_name, fh_commission)) + 
+  geom_boxplot(outlier.size = 0) +
+  coord_flip() +
+  geom_jitter(position = position_jitter(width = 0.30), shape = 20, size = 3, aes(colour = shipper_name), alpha = 0.75, show.legend = F) +
+  stat_summary(fun.y = mean, shape = 23, size = 1, fill = "yellow", col= "black", geom = 'point') +
+  labs (x = "shipper_name", y = "fh_commission") +
+  theme(panel.border = element_rect(fill = NA, colour = "black", size = 2)) +
+  theme(plot.title = element_text(size = 20, vjust = 2))
+```
+Nonetheless, let's perform Kruskal-Wallis:
+```{r shipper_name_kw, echo = FALSE}
+kruskal.test(fh_commission ~ shipper_name, data = mydata) 
+```
+The $p$ value suggests this to be a significant relationship.
+
+### 22. `diffhourS`
+
+`fh_commission` vs `diffhourS`: M v M
+
+Remember that we have derived `diffhourS` by calculating:
+
+$diffhourS = delivery\_scheduled\_until - delivery\_scheduled\_at$.
+
+We will start by observing the spread of the `diffhourS`
+```{r diffhourS, echo = FALSE}
+boxplot(mydata$diffhourS, data = mydata, boxwex = 0.5, xlab = "diffhourS", col = "steelblue3", horizontal=T)
+summary(mydata$diffhourS)
+```
+```{r diffhourSTH, echo = FALSE}
+threshold <- which(mydata$diffhourS > 80)
+threshold
+```
+and look at the spread of the data once again without the observations above this threshold.
+```{r diffhourS_bp,  echo = FALSE}
+boxplot(mydata$diffhourS[-threshold], data = mydata, boxwex = 0.5, xlab = "diffhourS", col = "steelblue3", horizontal=T)
+```
+
+Let us fit a regression model for `fh_commission` vs `diffhourS`.
+```{r model_6,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata <- mydata %>% 
+  mutate(cross_border =as.factor(is_cross_border*1))
+mydata %>% 
+  ggvis(~diffhourS, ~fh_commission, fill =~ cross_border, stroke := "gray", opacity := 0.5) %>% layer_points() %>% 
+  layer_model_predictions(model = "lm", stroke := "red")
+
+m6 <- lm(fh_commission ~ diffhourS, data = mydata)
+summary(m6)
+```
+Even if we removed extreme values, the line of best fit would still be flat, suggesting that there is no significant relationship, as is confirmed by the large $p$ value of $.4326$.
+
+### 23. `diffhourSP`
+
+`fh_commission` vs `diffhourSP`: M v M
+
+remember: $diffhourSP = delivery\_scheduled\_at - pickup\_scheduled\_at$
+
+Let us look at the spread of the variable.
+```{r diffhourSP, echo = FALSE}
+boxplot(mydata$diffhourSP, data = mydata, boxwex = 0.5, xlab = "diffhourSP", col = "steelblue3", horizontal=T)
+summary(mydata$diffhourSP)
+```
+There are a few 'large' observations:
+```{r diffhourSPTH, echo = FALSE}
+threshold <- which(mydata$diffhourSP > 180)
+threshold
+```
+It doesn't match any observation we picked up earlier when observing the other variables.
+
+Let us fit a regression model for `fh_commission` vs `diffhourS`.
+```{r model_7,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata <- mydata %>% 
+  mutate(cross_border =as.factor(is_cross_border*1))
+mydata %>% 
+  ggvis(~diffhourSP, ~fh_commission, fill =~ cross_border, stroke := "gray", opacity := 0.5) %>% layer_points() %>% 
+  layer_model_predictions(model = "lm", stroke := "red")
+
+m7 <- lm(fh_commission ~ diffhourSP, data = mydata)
+summary(m7)
+```
+This is a statistically significant relationship in which $7.16\%$ of the varibility in `fh_commission` is explained by `diffhourSP`.
+
+### 24. `diffhourMP`
+
+`fh_commission` vs `diffhourMP`: M v M
+
+$diffhourMP = matched\_at - posted\_at$
+
+```{r diffhourMP, echo = FALSE}
+boxplot(mydata$diffhourMP, data = mydata, boxwex = 0.5, xlab = "diffhourMP", col = "steelblue3", horizontal=T)
+summary(mydata$diffhourMP)
+```
+This is a *right skewed* distributions with a long tail to the right. We will not try to identify the observations in the right tail as there are too many. We will go to fit a regression model. 
+```{r model_8,  echo = FALSE, warnings = FALSE, message = FALSE}
+mydata <- mydata %>% 
+  mutate(cross_border =as.factor(is_cross_border*1))
+mydata %>% 
+  ggvis(~diffhourMP, ~fh_commission, fill =~ cross_border, stroke := "gray", opacity := 0.5) %>% layer_points() %>% 
+  layer_model_predictions(model = "lm", stroke := "red")
+
+m8 <- lm(fh_commission ~ diffhourMP, data = mydata)
+summary(m8)
+```
+This is a statistically significant, but weak relationship with $0.01 > p > 0.05$.
+
+# Summary
+
+We ultimately want to build a model:
+
+$$ y = b_0 + b_1x_1 + b_2x_2 + ... + b_px_p$$
+where $y$ is a response variable of interest and $x_i$'s (where $i=1, 2, ..., p$) are covariates, ie. explanatory variables.
+We have already recognised that our explanatory variables are not independent, and we should expect them to have a joint effect on some part of $y$. There will be a relationship between $x_i$ and $y$ that can’t be distinguished from the relationship between $x_j$ and $y$, as $x_i$ and $x_j$ are not independent.
+The relationship between $x_i$ and $y$ is no longer the full effect of $x_i$ on $y$. It’s actually the marginal, unique effect of $x_i$ on $y$, after controlling for the effect of $x_j$.
+
+While the model fit as a whole will include both the joint and the unique effects of all $x_i$'s on $y$, the regression coefficient for individual $x_i$ will only include its unique effect.
+
+We will start building the model using the available explanatory variables, but before we accept this as the best fitted model, we need to seek answers to the following questions:
+
+ i)  Do all of the explanatory variables collectively have an effect on the response variable?
+How big is $R^2/R^2_{adj}$? ie. is this a valid model worth further investigation?
+
+If the answer to the above question(s) is YES, next we need to assess:
+
+ii) *individually* do the explanatory variables have an effect on the response variable?
+We need to find a model that explains as much variability in $y$ effectively using only $x_i$'s, which when put collectively together truly influence the explanation in variability of $y$.    
+
+### Conclusions:
+
+##### 1. We have assumed that `fh_commision` is the key variable of interest: 
+
+$$fh\_commision = shipper\_closed\_price - carrier\_closed\_price$$.
+
+Hence, the two variables: `shipper_closed_price` and `carrier_closed_price` are directly related to the response variable: 
+
+  - they need to be known in order to obtain `fh_commision`.
+
+As such, we will not consider them as covariates in the model.
+
+`fh_commision` has a few extreme obsevations, one of which (observation no. $203$) has a very low negative value $-1,750.00$. *Should we expect this to happen?*
+
+
+##### 2. We have created three new variables:
+
+i) $diffhourS = delivery\_scheduled\_until - delivery\_scheduled\_at$,
+ii) $diffhourSP = delivery\_scheduled\_at - pickup\_scheduled\_at$ and
+iii) $diffhourMP = matched\_at - posted\_at$, 
+
+which calculate varying time differences in hours.
+
+*Is there any other **time difference** that should be observed and does it make sense for them to be used in the analysis?*
+
+##### 3. We heve descoverd that many variables are highly correlated, overlapping with the information that they contain.
+
+Apart from the one already mentioned:
+$$fh\_commision = shipper\_closed\_price − carrier\_closed_price$$,
+
+we have also got the following:
+
+a) for destination:
+- `destination_point`          
+- `destination_point_lat`       
+- `destination_point_long`      
+- `destination_postal_code`     
+- `destination_state`          
+- `destination_city`            
+- `destination_country` 
+
+b) for point of origin:
+- `origin_point`  
+- `origin_point_lat` 
+- `origin_point_long`          
+- `origin_postal_code`         
+- `origin_state`               
+- `origin_city`                
+- `origin_country`        
+
+Longitude and latitude points are not information that would be used in predictive modelling, but rather in graphical visualisation of the data.
+
+Other 'duplicated' information is contained through the following variables:
+
+- `distance` and
+- `duration`
+
+- `delivery_scheduled_at_month` and
+- `delivery_scheduled_at`  
+
+- `status` and
+- `is_completed`
+
+There is a need to go through the rest of the variables to consider them carefully.  
+
+##### 4. `load_description` is a very messy variable!!! 😣
+This variable needs some considerable work spent on it to make it suitable for modelling. 
+This could be done using *reguar expressions* to 'standardise' the given categories.
+
+
+##### 5. Statistically significant relationships with `fh_commision` are found from the following variables:
+
+a) **Measured type**:
+- `shipper_ask_price`: weak, but nonetheless statistically significant with $R^2 =1.36\%$;
+ - `distance`: statistically valid relationship with $R^2=11.91\%$;
+ - `duration`:  statistically valid relationship with $R^2=10.32\%$;
+ - `diffhourSP`: statistically valid relationship with $R^2=7.16\%$; 
+ - `diffhourMP`: statistically significant, but weak relationship with $R^2=0.34\%$.  
+b) **Attribute type**:
+ - `scheduled_at: month`: with a clear dip during the summer months;
+ - `delivery_scheduled_at: month`: with a clear dip during the summer months;
+ - `pickup_scheduled_at: month`:with a clear dip during the summer months;
+ - `load_equipment`: $p < 0.001$;
+ - `destination_state`: $p-value < 2.2e-16$;
+ - `destination_: postal_code; city; country`: all have $p < 2.2e-16$;
+ - `origin_state`: $p-value < 2.2e-16$;
+ - `origin_: postal_code; city; country`: `postal_code` is very unbalanced and we could not perform a statistical test; the other two have $p-value < 2.2e-16$;
+ - `shipper_name`: $p-value < 2.2e-16$;
+ 
+##### 6. We have a few attribute variables of concern:
+
+ - `is_hazmat` has only a few observations in one of its two categories making it very unbalanced for statistical modelling;
+ -  `carrier_name` has over $300$ levels, ie. categories;
+ -  `status`: the pricing would have been done before the status could be obtained?
+ -  `is_multistop`: same information as `is_cross_border`
+ -  `is_cross_border`: should it be linked to `destination_country`?
+ -  `is_completed`: after event to the 'pricing'?!;
+ -  `is_dropped`: 'after event'?!
+ 
+##### 7. Variables with too many missing values:
+
+- `max_bid`: $93.77\%$
+- `min_bid`: $93.77\%$                     
+- `no_bids_refused`: $93.77\%$
+- `unloaded_at`: $42.59 \%$
+- `carrier_winning_bid`: $98.42\%$
+
+```{r percNA, echo = FALSE, include = FALSE}
+sum(is.na(mydata$max_bid))/length(mydata$max_bid) * 100
+sum(is.na(mydata$min_bid))/length(mydata$min_bid) * 100
+sum(is.na(mydata$no_bids_refused))/length(mydata$no_bids_refused) * 100
+sum(is.na(mydata$unloaded_at))/length(mydata$unloaded_at) * 100
+sum(is.na(mydata$carrier_winning_bid))/length(mydata$carrier_winning_bid) * 100
+``` 
+ 
+We would need to think carefully about the best way of approaching them.
+
+##### 8. Variables deemed as not informative for modelling purposes:
+
+- `primary_tracking_source`: has only one possible outcome
+- `id`: same as system index number
+- `shipper_id`: same as `shipper_name` 
+- `shipment_no`: same as system index number
+- `destination` and `origin` `_postal_code` provide the same info as `destination` and `origin state`.
+
+##### 9. Why `destination_country` and `is_cross_border` are not showing the same information?
+
+```{r Info_Same?, echo = FALSE}
+table(mydata$destination_country)
+table(mydata$is_cross_border)
+```
+##### 10. How is variable `distance` calculated?
+
+Calculating shipping distances using google api:
+<https://developers.google.com/maps/documentation/distance-matrix/get-api-key>
+
+```
+# google api for calculating google maps distances
+library(gmapsdistance)
+
+# test <- gmapsdistance(origin = from, 
+#                      destination = to,
+#                      combinations = "pairwise",
+#                      key = "YOURAPIKEYHERE",
+#                      mode = "walking")
+
+dp <- paste0('"', destination_point_lat, '+', destination_point_long, '"')
+op <- paste0('"', origin_point_lat, '+', origin_point_long, '"')
+
+results = gmapsdistance(origin = op, 
+                        destination = dp, 
+                        mode = "driving")
+
+# convert results$Distance from m into miles
+udunits2::ud.convert(results$Distance, "m", "mi")
+#
+# ------------ or with:
+library(googleway)
+#
+# test <- google_distance(origins = from,
+#                        destinations = to,
+#                        mode = "walking",
+#                        key="YOURAPIKEYHERE")
+# -----------------
+#
+# Interesting to see (for example the 1st observation)
+
+results = gmapsdistance(origin = "27.617417+-99.523012", 
+                        destination = "38.8645105+-76.7279378",                     
+                        mode = "driving")
+                        
+results$Distance <- udunits2::ud.convert(results$Distance, "m", "mi")
+
+distance[1]
+[1] 1780.323
+duration[1]
+[1] 97020
+
+results
+$Time
+[1] 93651
+
+# There is some small discrapency 
+
+$Distance
+[1] 1774.97
+
+$Status
+[1] "OK"
+
+```
+Who does those calculations (distance and duration); when is this information collected?
+
+### Proposed Model
+ 
+*the response variable*:
+
+- $y = fh\_commision$
+
+*the explanatory variables*:
+
+- $x_1 = shipper\_ask\_price$,
+- $x_2 = distance$,
+- $x_3 = duration$
+- $x_4 = diffhourSP$, 
+- $x_5 = diffhourMP$, 
+- $x_6 = delivery\_scheduled\_until\:month$,
+- $x_7 = delivery\_scheduled\_at\:month$,
+- $x_8 = pickup\_scheduled\_at\:month$,
+- $x_9 = load\_description$, !!!!!
+- $x_{10} = load\_equipment$, 
+- $x_{11} = destination\_state$,
+- $x_{12} = destination\_city$,
+- $x_{13} = destination\_country$,
+- $x_{14} = origin\_state$
+- $x_{15} = origin\_city$
+- $x_{16} = origin\_country$
+- $x_{17} = shipper\_name$ 
+- $x_{18} = is\_cross_border$
+
+Thus, we have:
+
+$$ y = b_0 +b_1x_1 + b_2x_2 + ... + b_{18}x_{18} $$
+
+The majority of the variables are attribute type and, as we have seen earlier in the report when observing them individually and in relation to `fh_commision` many of them are correlated, providing the same type of information. 
+
+Another point that we need to consider is that many variables are high-cardinality categorical attribute variables, which will need to be encoded when used in the model fitting procedure.
+
+# Model Fitting
+
+We will fit a model for illustrative purposes, as we are not sure if the variable `fh_commision` is the key variable of interest, and some of the variables we wish to consider for our model are messy and in correlation with each other. Hence, we will simplify the set of explanatory variables we wish to use.   
+
+This is the data we will use for our model:
+```{r data1, echo = FALSE}
+mydata <- mydata %>% 
+  mutate(delivery_scheduled_until_month = factor(month(delivery_scheduled_until))) %>% 
+  mutate(delivery_scheduled_at_month = factor(month(delivery_scheduled_at))) %>% 
+  mutate(pickup_scheduled_at_month = factor(month(pickup_scheduled_at)))
+
+cols.dont.want <- c("max_bid", "min_bid", "primary_tracking_source", "no_bids_refused", "delivery_scheduled_until", "delivery_scheduled_at", "pickup_scheduled_at", "is_hazmat", "carrier_closed_price", "load_value", "destination_point", "destination_point_lat", "destination_point_long", "destination_postal_code", "origin_point", "origin_point_lat", "origin_point_long", "origin_postal_code", "carrier_name", "shipper_closed_price", "status", "is_multistop", "id", "shipper_id", "shipment_no", "matched_at", "carrier_id", "is_completed", "is_dropped", "unloaded_at", "posted_at", "is_halted", "carrier_winning_bid", "is_cross_border", "diffhourS") 
+md <- mydata[, ! names(mydata) %in% cols.dont.want, drop = F]
+glimpse(md)
+```
+
+Remember, there is a number of *"messy"* variables, wchich we will ignore for the purpose of just showing the modelling procedure and to illustrate the need for tidying them up. 
+
+```{r model_fitting, echo = FALSE, warnings = FALSE, message = FALSE}
+options(max.print=999999)
+options(contrasts=c("contr.sum","contr.poly"))
+
+set.seed(123)
+train <- sample(x = seq(1:dim(mydata)[[1]]), size = dim(mydata)[[1]] * 0.80, replace = FALSE)
+test <- seq(1:dim(mydata)[[1]])[-train]
+
+fullmod = glm(fh_commission ~ ., data = md[-train, ])
+
+step <- stepAIC(fullmod, direction="both")
+step$anova
+
+fm1 <- glm(fh_commission ~ shipper_ask_price + duration + load_description + destination_city + pickup_scheduled_at_month, data = md[-train, ])
+
+summary(fm1)
+
+pred <- predict(fm1, md[test,], level = 0.95, interval = "prediction")
+
+data.frame(round(pred, digits = 2), round(md$fh_commission[test], digits = 2))
+```
+
+
+
